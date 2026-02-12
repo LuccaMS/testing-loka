@@ -1,0 +1,8 @@
+mangum
+fastapi
+qdrant-client
+langchain-google-genai
+langchain
+xgboost
+pandas
+joblib

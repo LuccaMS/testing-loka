@@ -1,0 +1,8 @@
+#boto3
+qdrant-client
+google-genai
+mangum
+fastapi
+langchain-text-splitters
+python-multipart
+uvicorn
