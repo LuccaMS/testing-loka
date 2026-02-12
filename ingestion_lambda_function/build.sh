@@ -1,27 +1,32 @@
 #!/bin/bash
 set -e
+BUILD_DIR="$(pwd)/dist"
 
-BUILD_DIR="build"
-rm -rf $BUILD_DIR lambda.zip
-mkdir -p $BUILD_DIR
+# 1. Clean the folder (using sudo since files might be root-owned)
+mkdir -p "$BUILD_DIR"
+echo "Cleaning dist folder..."
+sudo rm -rf "${BUILD_DIR:?}"/*
 
-echo "Building Lambda package..."
-
+# 2. Build dependencies as root (the default)
+echo "Installing dependencies..."
 docker run --rm \
-    --entrypoint "" \
     -v "$PWD":/var/task \
     -w /var/task \
+    --entrypoint /bin/bash \
     public.ecr.aws/lambda/python:3.12 \
-    sh -c "
-        pip install --upgrade pip && \
-        pip install -r requirements.txt -t $BUILD_DIR && \
-        cp *.py $BUILD_DIR/
-    "
+    -c "pip install -r requirements.txt -t dist --no-cache-dir && \
+        rm -rf dist/*/__pycache__ dist/*.pyc"
 
-cd $BUILD_DIR
-# Don't exclude .dist-info - that's where the metadata is!
-zip -r ../lambda.zip . -x "*.pyc" -x "*__pycache__*"
-cd ..
+# 3. Copy code
+echo "Copying application files..."
+cp *.py *.json dist/ 2>/dev/null || :
 
-echo "✓ Lambda package created: lambda.zip"
-echo "  Size: $(du -h lambda.zip | cut -f1)"
+# 4. THE FIX: Reclaim ownership of everything in dist
+# This changes 'root' back to 'lucca'
+echo "Fixing permissions..."
+sudo chown -R $(id -u):$(id -g) "$BUILD_DIR"
+chmod -R 755 "$BUILD_DIR"
+
+echo "---"
+echo "✓ Build complete. LocalStack should see the changes."
+echo "---"

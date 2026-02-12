@@ -15,6 +15,7 @@ services:
     volumes:
       - "/var/run/docker.sock:/var/run/docker.sock"
       - "./localstack-data:/var/lib/localstack"
+      - "/home/lucca/testing-loka:/home/lucca/testing-loka"
     networks:
       - medical-rag-network
 

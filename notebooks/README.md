@@ -68,3 +68,6 @@ apparent significance of `exercise_frequency` was not meaningful in practice.
 > This is consistent with random label assignment during synthetic data generation.
 > **A COPD classification model cannot be built from this dataset.**
 
+
+For the regression model analysis take a look at [README](regression/README.MD)
+

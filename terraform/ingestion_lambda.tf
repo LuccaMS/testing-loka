@@ -6,8 +6,12 @@ resource "aws_lambda_function" "ingestion_lambda" {
 
   timeout = 30
 
-  filename         = "../ingestion_lambda_function/lambda.zip"
-  source_code_hash = filebase64sha256("../ingestion_lambda_function/lambda.zip")
+  memory_size = 1024
+
+  s3_bucket = "hot-reload"
+
+  #the key HAS to be an absolute path
+  s3_key    = "/home/lucca/testing-loka/ingestion_lambda_function/dist" # <-- CHANGE THIS to your absolute path
 
   environment {
     variables = {

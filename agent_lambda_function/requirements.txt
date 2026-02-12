@@ -3,6 +3,6 @@ fastapi
 qdrant-client
 langchain-google-genai
 langchain
-xgboost
-pandas
+xgboost-cpu[pandas]
 joblib
+scikit-learn

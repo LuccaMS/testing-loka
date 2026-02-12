@@ -18,6 +18,8 @@ from qdrant_client.models import (
 from google import genai
 from google.genai import types
 
+import xgboost as xgb
+
 # LangGraph & LangChain (For the Agent Logic)
 #from langgraph.prebuilt import create_react_agent # This is the modern replacement
 from langchain.agents import create_agent
@@ -25,9 +27,6 @@ from langchain_core.tools import tool
 from langchain_core.messages import HumanMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
 import joblib
-
-from utils import predict_alanine_aminotransferase
-
 
 # ------------------------
 # Configuration
@@ -50,6 +49,7 @@ VECTOR_SIZE = 768
 # Global Clients
 qdrant_client: Optional[AsyncQdrantClient] = None
 genai_client: Optional[genai.Client] = None
+xgboost_model = None
 
 # ------------------------
 # Helpers
@@ -76,6 +76,99 @@ def generate_embedding_sync(text: str) -> List[float]:
     except Exception as e:
         logger.error(f"Native Embedding Error: {e}")
         raise e
+
+from langchain_core.tools import tool
+from typing import Literal
+import pandas as pd
+
+#The default values on the pydantic object were extract on  "notebooks/feature_engineering.ipynb". 
+#These values are the most frequent ones, so if the person do not give this information we use
+#the most frequent as default
+
+
+# Mapping dictionaries based on the feature engineering logic
+MAPPINGS = {
+    'sex': {'Female': 0, 'Male': 1},
+    "smoker": {"No": 0, "Yes": 1},
+    "diagnosis_code": {"D1": 1.0, "D2": 2.0, "D3": 3.0, "D4": 4.0, "D5": 5.0},
+    "exercise_frequency": {"Low": 0.0, "Moderate": 1.0, "High": 2.0},
+    "diet_quality": {"Poor": 0.0, "Average": 1.0, "Good": 2.0},
+    "income_bracket": {"Low": 0.0, "Middle": 1.0, "High": 2.0},
+    "education_level": {"Primary": 0.0, "Secondary": 1.0, "Tertiary": 2.0},
+    "urban": {"No": 0.0, "Yes": 1.0},
+    "readmitted": {"No": 0.0, "Yes": 1.0}
+}
+
+@tool
+def predict_alanine_aminotransferase(
+    age: float = 53.0,
+    sex: Literal["Male", "Female"] = "Female",
+    bmi: float = 26.9,
+    smoker: Literal["Yes", "No"] = "No",
+    diagnosis_code: Literal["D1", "D2", "D3", "D4", "D5"] = "D5",
+    medication_count: int = 3,
+    days_hospitalized: int = 5,
+    readmitted: Literal["No", "Yes"] = "No",
+    last_lab_glucose: float = 100.1,
+    exercise_frequency: Literal["Low", "Moderate", "High"] = "Moderate",
+    diet_quality: Literal["Poor", "Average", "Good"] = "Average",
+    income_bracket: Literal["Low", "Middle", "High"] = "Middle",
+    education_level: Literal["Primary", "Secondary", "Tertiary"] = "Secondary",
+    urban: Literal["No", "Yes"] = "Yes",
+    albumin_globulin_ratio: float = 0.5037,
+) -> float:
+    """
+    Predicts the Alanine Aminotransferase (ALT) levels for a patient using an XGBoost model.
+    Use this tool when users ask for predictions, forecasts, or expected liver enzyme values.
+    """
+    global xgboost_model # Loaded in lifespan
+    
+    if xgboost_model is None:
+        return "Error: Prediction model is not currently loaded in the system."
+
+    try:
+        # 1. Transform literals to numeric values used in training
+        data_dict = {
+            'age': age,
+            'sex': MAPPINGS["sex"][sex],
+            'bmi': bmi,
+            'smoker': MAPPINGS["smoker"][smoker],
+            'diagnosis_code': MAPPINGS["diagnosis_code"][diagnosis_code],
+            'medication_count': medication_count,
+            'days_hospitalized': days_hospitalized,
+            'readmitted':  MAPPINGS["readmitted"][readmitted],
+            'last_lab_glucose': last_lab_glucose,
+            'exercise_frequency': MAPPINGS["exercise_frequency"][exercise_frequency],
+            'diet_quality': MAPPINGS["diet_quality"][diet_quality],
+            'income_bracket': MAPPINGS["income_bracket"][income_bracket],
+            'education_level': MAPPINGS["education_level"][education_level],
+            'urban': MAPPINGS["urban"][urban],
+            'albumin_globulin_ratio': albumin_globulin_ratio
+        }
+
+        # 2. Convert to DataFrame
+        # IMPORTANT: This order MUST match X = data.drop(...) from your training script
+        df = pd.DataFrame([data_dict])
+        
+        # Ensure the columns are in the exact order the model expects
+        column_order = [
+            'age', 'sex', 'bmi', 'smoker', 'diagnosis_code', 'medication_count',
+            'days_hospitalized', 'readmitted', 'last_lab_glucose', 'exercise_frequency',
+            'diet_quality', 'income_bracket', 'education_level', 'urban', 'albumin_globulin_ratio'
+        ]
+        df = df[column_order]
+
+        # 3. Predict
+        prediction = xgboost_model.predict(df)[0]
+
+        return (
+            f"Based on the clinical parameters provided, the predicted Alanine Aminotransferase (ALT) "
+            f"level is {float(prediction):.2f} U/L."
+        )
+
+    except Exception as e:
+        logger.error(f"XGBoost Prediction Error: {e}")
+        return f"I encountered an error while trying to calculate the prediction: {str(e)}"
 
 # ------------------------
 # 1. The RAG Tool
@@ -159,7 +252,7 @@ def get_agent():
 
     # LangChain wrapper for Gemini Chat (works well for logic)
     llm = ChatGoogleGenerativeAI(
-        model=os.environ.get("MODEL_ID", "gemini-2.5-flash-lite") ,
+        model=os.environ.get("MODEL_ID", "gemini-2.0-flash-lite") ,
         temperature=0,
         google_api_key=GEMINI_API_KEY
     )
@@ -169,18 +262,73 @@ def get_agent():
         predict_alanine_aminotransferase
     ]
     
-    system_prompt = (
-        "You are an expert Medical AI Assistant with access to two specific tools:\n\n"
-        "1. 'search_medical_records': Use this to find information in the patient's history, "
-        "doctor notes, or medical documents. Use this for qualitative questions.\n\n"
-        "2. 'predict_alanine_aminotransferase': Use this when a user asks for a 'prediction', "
-        "'expected value', or 'forecast' of Alanine Aminotransferase (ALT) levels.\n\n"
-        "Guidelines for the Prediction Tool:\n"
-        "- If the user says 'woman' or 'lady', map sex to 'Female'. If 'man' or 'guy', map to 'Male'.\n"
-        "- If the user says 'athlete' or 'gym', map exercise_frequency to 'High'.\n"
-        "- If the user says 'city' or 'downtown', set urban to 1.\n"
-        "- If the user DOES NOT provide a value (like BMI or Smoker), leave it blank so the tool uses its clinical defaults.\n"
-        "- Always provide the final result clearly with units (U/L)."
+    system_prompt = ('''
+        <system_prompt>
+        <role>
+            You are an expert Medical AI Assistant with access to two specific tools.
+        </role>
+
+        <available_tools>
+            <tool>
+            <name>search_medical_records</name>
+            <description>
+                Use this to find information in the patient's history, doctor notes, or medical documents. Use this for qualitative questions.
+            </description>
+            </tool>
+            
+            <tool>
+            <name>predict_alanine_aminotransferase</name>
+            <description>
+                Use this to predict Alanine Aminotransferase (ALT) levels.
+            </description>
+            <critical_rule>
+                MUST ALWAYS provide a prediction when requested by the user, EVEN WITHOUT COMPLETE INFORMATION. Never refuse to predict due to missing data.
+            </critical_rule>
+            </tool>
+        </available_tools>
+
+        <prediction_tool_guidelines>
+            <feature_mapping>
+            <mapping>
+                <user_terms>woman, lady</user_terms>
+                <feature>Female</feature>
+            </mapping>
+            <mapping>
+                <user_terms>man, guy</user_terms>
+                <feature>Male</feature>
+            </mapping>
+            <mapping>
+                <user_terms>athlete, gym</user_terms>
+                <feature>High exercise_frequency</feature>
+            </mapping>
+            <mapping>
+                <user_terms>city, downtown</user_terms>
+                <feature>urban = 1</feature>
+            </mapping>
+            </feature_mapping>
+
+            <missing_data_handling>
+            <rule>
+                If the user does not provide a value (like BMI or smoker status), leave it blank so the tool uses its clinical defaults.
+            </rule>
+            <rule>
+                ALWAYS predict ALT when requested, regardless of missing information.
+            </rule>
+            <rule>
+                When providing predictions with incomplete data, clearly inform the user: "This is a prediction based on available data. However, this prediction has limited information which may impact accuracy. Providing additional information, especially BMI, would significantly improve the prediction's reliability."
+            </rule>
+            </missing_data_handling>
+
+            <output_requirements>
+            <requirement>
+                Always provide the final result clearly with units (U/L).
+            </requirement>
+            <requirement>
+                Include a disclaimer about data completeness and its potential impact on accuracy when information is limited.
+            </requirement>
+            </output_requirements>
+        </prediction_tool_guidelines>
+        </system_prompt>'''
     )
 
     agent_executor = create_agent(
@@ -223,9 +371,9 @@ async def lifespan(app: FastAPI):
 
     # --- Load XGBoost ---
     try:
-        # Load your saved model
-        xgboost_model = joblib.load("model.pkl")
-        logger.info("✓ XGBoost model.pkl loaded")
+        global xgboost_model
+        xgboost_model = xgb.XGBRegressor()
+        xgboost_model.load_model("model_alt.json")  # ✅ Matches your filename
     except Exception as e:
         logger.error(f"✗ Failed to load model.pkl: {e}")
 
@@ -257,6 +405,8 @@ async def chat_endpoint(request: ChatRequest):
     try:
         # LangGraph invocation
         result = await agent.ainvoke(inputs)
+
+        logger.info(result["messages"])
         
         # Result is a dict with 'messages' list. Last one is the AI response.
         final_message = result["messages"][-1].content
