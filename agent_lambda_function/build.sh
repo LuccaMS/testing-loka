@@ -18,8 +18,11 @@ docker run --rm \
         rm -rf dist/*/__pycache__ dist/*.pyc"
 
 # 3. Copy code
+#echo "Copying application files..."
+#cp *.py *.json dist/ 2>/dev/null || :
+
 echo "Copying application files..."
-cp *.py *.json dist/ 2>/dev/null || :
+rsync -av --exclude 'dist' --exclude '__pycache__' --exclude '*.pyc' ./ dist/
 
 # 4. THE FIX: Reclaim ownership of everything in dist
 # This changes 'root' back to 'lucca'

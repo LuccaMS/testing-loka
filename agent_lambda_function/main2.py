@@ -10,9 +10,7 @@ from pydantic import BaseModel
 
 # Qdrant
 from qdrant_client import AsyncQdrantClient
-from qdrant_client.models import (
-    Filter, FieldCondition, MatchValue
-)
+from qdrant_client.models import Filter, FieldCondition, MatchValue
 
 # Gemini Native SDK (for Embeddings)
 from google import genai
@@ -20,13 +18,12 @@ from google.genai import types
 
 import xgboost as xgb
 
-# LangGraph & LangChain (For the Agent Logic)
-#from langgraph.prebuilt import create_react_agent # This is the modern replacement
+# LangChain (For the Agent Logic)
 from langchain.agents import create_agent
 from langchain_core.tools import tool
 from langchain_core.messages import HumanMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
-import joblib
+import pandas as pd
 
 # ------------------------
 # Configuration
@@ -42,7 +39,8 @@ QDRANT_PORT = int(os.environ.get("QDRANT_PORT", 6333))
 QDRANT_API_KEY = os.environ.get("QDRANT_API_KEY", None)
 
 # Config to match Ingestion Lambda
-EMBEDDING_MODEL_ID = os.environ.get("EMBEDDING_MODEL_ID", "gemini-embedding-001") 
+EMBEDDING_MODEL_ID = os.environ.get("EMBEDDING_MODEL_ID", "gemini-embedding-001")
+MODEL_ID = os.environ.get("MODEL_ID", "gemini-2.0-flash-lite")
 COLLECTION_NAME = "medical_docs"
 VECTOR_SIZE = 768
 
@@ -56,15 +54,11 @@ xgboost_model = None
 # ------------------------
 
 def generate_embedding_sync(text: str) -> List[float]:
-    """
-    Generates embedding using the native google-genai SDK.
-    Run this in a thread to keep FastAPI async.
-    """
+    """Generates embedding using the native google-genai SDK."""
     if not genai_client:
         raise ValueError("GenAI Client not initialized")
     
     try:
-        # Exact same logic as ingestion lambda
         result = genai_client.models.embed_content(
             model=EMBEDDING_MODEL_ID,
             contents=[text],
@@ -77,15 +71,11 @@ def generate_embedding_sync(text: str) -> List[float]:
         logger.error(f"Native Embedding Error: {e}")
         raise e
 
-from langchain_core.tools import tool
-from typing import Literal
-import pandas as pd
+# ------------------------
+# Tools
+# ------------------------
 
-#The default values on the pydantic object were extract on  "notebooks/feature_engineering.ipynb". 
-#These values are the most frequent ones, so if the person do not give this information we use
-#the most frequent as default
-
-# Mapping dictionaries based on the feature engineering logic
+# Mapping dictionaries
 MAPPINGS = {
     'sex': {'Female': 0, 'Male': 1},
     "smoker": {"No": 0, "Yes": 1},
@@ -101,55 +91,54 @@ MAPPINGS = {
 @tool
 def predict_alanine_aminotransferase(
     age: float = 53.0,
-    sex: Literal["Male", "Female"] = "Female",
+    sex: str = "Female",
     bmi: float = 26.9,
-    smoker: Literal["Yes", "No"] = "No",
-    diagnosis_code: Literal["D1", "D2", "D3", "D4", "D5"] = "D5",
+    smoker: str = "No",
+    diagnosis_code: str = "D5",
     medication_count: int = 3,
     days_hospitalized: int = 5,
-    readmitted: Literal["No", "Yes"] = "No",
+    readmitted: str = "No",
     last_lab_glucose: float = 100.1,
-    exercise_frequency: Literal["Low", "Moderate", "High"] = "Moderate",
-    diet_quality: Literal["Poor", "Average", "Good"] = "Average",
-    income_bracket: Literal["Low", "Middle", "High"] = "Middle",
-    education_level: Literal["Primary", "Secondary", "Tertiary"] = "Secondary",
-    urban: Literal["No", "Yes"] = "Yes",
+    exercise_frequency: str = "Moderate",
+    diet_quality: str = "Average",
+    income_bracket: str = "Middle",
+    education_level: str = "Secondary",
+    urban: str = "Yes",
     albumin_globulin_ratio: float = 0.5037,
-) -> float:
+) -> str:
     """
     Predicts the Alanine Aminotransferase (ALT) levels for a patient using an XGBoost model.
     Use this tool when users ask for predictions, forecasts, or expected liver enzyme values.
     """
-    global xgboost_model # Loaded in lifespan
+    global xgboost_model
     
     if xgboost_model is None:
         return "Error: Prediction model is not currently loaded in the system."
 
     try:
-        # 1. Transform literals to numeric values used in training
+        # Transform literals to numeric values
         data_dict = {
             'age': age,
-            'sex': MAPPINGS["sex"][sex],
+            'sex': MAPPINGS["sex"].get(sex, 0),
             'bmi': bmi,
-            'smoker': MAPPINGS["smoker"][smoker],
-            'diagnosis_code': MAPPINGS["diagnosis_code"][diagnosis_code],
+            'smoker': MAPPINGS["smoker"].get(smoker, 0),
+            'diagnosis_code': MAPPINGS["diagnosis_code"].get(diagnosis_code, 5.0),
             'medication_count': medication_count,
             'days_hospitalized': days_hospitalized,
-            'readmitted':  MAPPINGS["readmitted"][readmitted],
+            'readmitted':  MAPPINGS["readmitted"].get(readmitted, 0),
             'last_lab_glucose': last_lab_glucose,
-            'exercise_frequency': MAPPINGS["exercise_frequency"][exercise_frequency],
-            'diet_quality': MAPPINGS["diet_quality"][diet_quality],
-            'income_bracket': MAPPINGS["income_bracket"][income_bracket],
-            'education_level': MAPPINGS["education_level"][education_level],
-            'urban': MAPPINGS["urban"][urban],
+            'exercise_frequency': MAPPINGS["exercise_frequency"].get(exercise_frequency, 1.0),
+            'diet_quality': MAPPINGS["diet_quality"].get(diet_quality, 1.0),
+            'income_bracket': MAPPINGS["income_bracket"].get(income_bracket, 1.0),
+            'education_level': MAPPINGS["education_level"].get(education_level, 1.0),
+            'urban': MAPPINGS["urban"].get(urban, 1.0),
             'albumin_globulin_ratio': albumin_globulin_ratio
         }
 
-        # 2. Convert to DataFrame
-        # IMPORTANT: This order MUST match X = data.drop(...) from your training script
+        # Convert to DataFrame
         df = pd.DataFrame([data_dict])
         
-        # Ensure the columns are in the exact order the model expects
+        # Ensure correct column order
         column_order = [
             'age', 'sex', 'bmi', 'smoker', 'diagnosis_code', 'medication_count',
             'days_hospitalized', 'readmitted', 'last_lab_glucose', 'exercise_frequency',
@@ -157,7 +146,7 @@ def predict_alanine_aminotransferase(
         ]
         df = df[column_order]
 
-        # 3. Predict
+        # Predict
         prediction = xgboost_model.predict(df)[0]
 
         return (
@@ -166,39 +155,42 @@ def predict_alanine_aminotransferase(
         )
 
     except Exception as e:
-        logger.error(f"XGBoost Prediction Error: {e}")
+        logger.error(f"XGBoost Prediction Error: {e}", exc_info=True)
         return f"I encountered an error while trying to calculate the prediction: {str(e)}"
 
 @tool
 async def search_medical_records(
-    query: str, 
-    patient_id: Optional[str] = None, 
+    query: str,
+    patient_id: Optional[str] = None,
     clinician_id: Optional[str] = None
-):
+) -> str:
     """
     Search the medical vector database for relevant documents.
     ALWAYS use this tool when answering questions about medical history, diagnosis, or patient details.
     
     Args:
-        query: The search query string (e.g., "symptoms of heart attack").
-        patient_id: Optional. The specific ID of the patient (e.g., "PT-12345").
-        clinician_id: Optional. The ID of the doctor/clinician (e.g., "CL-9876").
+        query: The search query string
+        patient_id: Optional patient ID filter
+        clinician_id: Optional clinician ID filter
+    
+    Returns:
+        JSON string with search results and citations
     """
     global qdrant_client
     
     if not qdrant_client:
-        return "Error: Database connection not available."
+        return '{"error": "Database connection not available.", "citations": []}'
 
     logger.info(f"🔍 Searching: '{query}' | Patient: {patient_id}")
 
     try:
-        # 1. Generate Embedding (Native SDK in Thread)
+        # Generate Embedding
         query_vector = await asyncio.to_thread(generate_embedding_sync, query)
 
         if not query_vector:
-            return "Error: Failed to generate embedding for query."
+            return '{"error": "Failed to generate embedding for query.", "citations": []}'
 
-        # 2. Build Filters
+        # Build Filters
         must_filters = []
         if patient_id:
             must_filters.append(FieldCondition(key="patient_id", match=MatchValue(value=patient_id)))
@@ -207,135 +199,108 @@ async def search_medical_records(
 
         search_filter = Filter(must=must_filters) if must_filters else None
 
-        # 3. Search Qdrant
+        # Search Qdrant
         search_result = await qdrant_client.query_points(
             collection_name=COLLECTION_NAME,
             query=query_vector,
-            limit=5, 
+            limit=5,
             query_filter=search_filter,
             with_payload=True
         )
 
-        # 4. Format Results
+        # Format Results with Citations
         if not search_result.points:
-            return "No relevant medical records found matching criteria."
+            return '{"content": "No relevant medical records found matching criteria.", "citations": []}'
 
-        formatted_hits = []
-        for hit in search_result.points:
-            payload = hit.payload
-            formatted_hits.append(
-                f"Source: {payload.get('file_name')} (Section: {payload.get('section')})\n"
-                f"Patient: {payload.get('patient_id')} | Clinician: {payload.get('clinician_id')}\n"
-                f"Content: {payload.get('text')}\n"
-                "---"
-            )
+        formatted_content = []
+        citations = []
         
-        return "\n".join(formatted_hits)
+        for idx, hit in enumerate(search_result.points, start=1):
+            payload = hit.payload
+            
+            # Build citation
+            citation = {
+                "id": idx,
+                "file_name": payload.get('file_name', 'Unknown'),
+                "section": payload.get('section', 'N/A'),
+                "patient_id": payload.get('patient_id', 'N/A'),
+                "clinician_id": payload.get('clinician_id', 'N/A'),
+                "score": float(hit.score) if hasattr(hit, 'score') else None
+            }
+            citations.append(citation)
+            
+            # Format content with citation markers
+            content_piece = (
+                f"[{idx}] {payload.get('text', '')}\n"
+                f"(Source: {payload.get('file_name')} - {payload.get('section')})"
+            )
+            formatted_content.append(content_piece)
+        
+        import json
+        result = {
+            "content": "\n\n".join(formatted_content),
+            "citations": citations
+        }
+        
+        return json.dumps(result, indent=2)
 
     except Exception as e:
-        logger.error(f"Search tool error: {str(e)}")
-        return f"Error occurred during search: {str(e)}"
+        logger.error(f"Search tool error: {str(e)}", exc_info=True)
+        import json
+        return json.dumps({
+            "error": f"Error occurred during search: {str(e)}",
+            "citations": []
+        })
+
+# ------------------------
+# Agent
+# ------------------------
 
 def get_agent():
-    """Initializes the LangGraph ReAct agent."""
+    """Initializes the LangChain agent."""
     if not GEMINI_API_KEY:
         raise ValueError("GEMINI_API_KEY is missing")
 
     llm = ChatGoogleGenerativeAI(
-        model=os.environ.get("MODEL_ID", "gemini-2.0-flash-lite") ,
+        model=MODEL_ID,
         temperature=0,
         google_api_key=GEMINI_API_KEY
     )
 
     tools = [
-        search_medical_records, 
+        search_medical_records,
         predict_alanine_aminotransferase
     ]
     
-    system_prompt = ('''
-        <system_prompt>
-        <role>
-            You are an expert Medical AI Assistant with access to two specific tools.
-        </role>
+    system_prompt = '''You are an expert Medical AI Assistant with access to two specific tools.
 
-        <available_tools>
-            <tool>
-            <name>search_medical_records</name>
-            <description>
-                Use this to find information in the patient's history, doctor notes, or medical documents. Use this for qualitative questions.
-            </description>
-            </tool>
-            
-            <tool>
-            <name>predict_alanine_aminotransferase</name>
-            <description>
-                Use this to predict Alanine Aminotransferase (ALT) levels.
-            </description>
-            <critical_rule>
-                MUST ALWAYS provide a prediction when requested by the user, EVEN WITHOUT COMPLETE INFORMATION. Never refuse to predict due to missing data.
-            </critical_rule>
-            </tool>
-        </available_tools>
+AVAILABLE TOOLS:
+1. search_medical_records - Returns JSON with "content" and "citations"
+2. predict_alanine_aminotransferase - Predicts ALT levels
 
-        <prediction_tool_guidelines>
-            <feature_mapping>
-            <mapping>
-                <user_terms>woman, lady</user_terms>
-                <feature>Female</feature>
-            </mapping>
-            <mapping>
-                <user_terms>man, guy</user_terms>
-                <feature>Male</feature>
-            </mapping>
-            <mapping>
-                <user_terms>athlete, gym</user_terms>
-                <feature>High exercise_frequency</feature>
-            </mapping>
-            <mapping>
-                <user_terms>city, downtown</user_terms>
-                <feature>urban = 1</feature>
-            </mapping>
-            </feature_mapping>
-
-            <missing_data_handling>
-            <rule>
-                If the user does not provide a value (like BMI or smoker status), leave it blank so the tool uses its clinical defaults.
-            </rule>
-            <rule>
-                ALWAYS predict ALT when requested, regardless of missing information.
-            </rule>
-            <rule>
-                When providing predictions with incomplete data, clearly inform the user: "This is a prediction based on available data. However, this prediction has limited information which may impact accuracy. Providing additional information, especially BMI, would significantly improve the prediction's reliability."
-            </rule>
-            </missing_data_handling>
-
-            <output_requirements>
-            <requirement>
-                Always provide the final result clearly with units (U/L).
-            </requirement>
-            <requirement>
-                Include a disclaimer about data completeness and its potential impact on accuracy when information is limited.
-            </requirement>
-            </output_requirements>
-        </prediction_tool_guidelines>
-        </system_prompt>'''
-    )
+When using search results, reference citations like [1], [2], etc.
+Always provide sources at the end of your response.
+'''
 
     agent_executor = create_agent(
-        model=llm, 
-        tools=tools, 
+        model=llm,
+        tools=tools,
         system_prompt=system_prompt
     )
     
     return agent_executor
 
+# ------------------------
+# Lifecycle
+# ------------------------
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize connections on startup."""
-    global qdrant_client, genai_client
+    global qdrant_client, genai_client, xgboost_model
     logger.info("Initializing RAG Lambda...")
     
-    # Init Gemini Native Client (for Embeddings)
+    # Init Gemini Native Client
     if GEMINI_API_KEY:
         try:
             genai_client = genai.Client(api_key=GEMINI_API_KEY)
@@ -355,13 +320,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"✗ Qdrant Connection Failed: {e}")
 
-    # --- Load XGBoost ---
+    # Load XGBoost
     try:
-        global xgboost_model
         xgboost_model = xgb.XGBRegressor()
-        xgboost_model.load_model("model_alt.json")  # ✅ Matches your filename
+        xgboost_model.load_model("model_alt.json")
+        logger.info("✓ XGBoost model loaded")
     except Exception as e:
-        logger.error(f"✗ Failed to load model.pkl: {e}")
+        logger.error(f"✗ Failed to load model: {e}")
 
     yield
 
@@ -389,15 +354,15 @@ async def chat_endpoint(request: ChatRequest):
     inputs = {"messages": [HumanMessage(content=request.message)]}
     
     try:
-        # LangGraph invocation
+        # LangGraph invocation (exactly as in your original)
         result = await agent.ainvoke(inputs)
-
-        print(result["messages"])
+        
+        logger.info(f"Agent completed with {len(result['messages'])} messages")
         
         # Result is a dict with 'messages' list. Last one is the AI response.
         final_message = result["messages"][-1].content
 
-        #usually this is not needed, but gemini  "gemini-3-flash-preview" add signatures to tool usage
+        # Handle Gemini's list format
         if isinstance(final_message, list):
             final_message = final_message[0].get("text", "empty")
             
