@@ -110,28 +110,54 @@ async def search_medical_records(
             })
 
         formatted_content = []
-        citations = []
         
-        for idx, hit in enumerate(search_result.points, start=1):
+        # Group results by document (file_name + patient_id)
+        # This ensures all chunks from the same document get the same citation ID
+        document_groups = {}
+        
+        for hit in search_result.points:
             payload = hit.payload
+            doc_key = (payload.get('file_name', 'Unknown'), payload.get('patient_id', 'N/A'))
             
-            # Build citation
+            if doc_key not in document_groups:
+                document_groups[doc_key] = {
+                    'chunks': [],
+                    'max_score': float(hit.score) if hasattr(hit, 'score') else 0,
+                    'file_name': payload.get('file_name', 'Unknown'),
+                    'patient_id': payload.get('patient_id', 'N/A'),
+                    'clinician_id': payload.get('clinician_id', 'N/A'),
+                }
+            
+            document_groups[doc_key]['chunks'].append({
+                'text': payload.get('text', ''),
+                'section': payload.get('section', 'N/A'),
+                'score': float(hit.score) if hasattr(hit, 'score') else 0
+            })
+            
+            # Keep track of highest score for this document
+            if hasattr(hit, 'score') and float(hit.score) > document_groups[doc_key]['max_score']:
+                document_groups[doc_key]['max_score'] = float(hit.score)
+        
+        # Build citations (one per unique document)
+        citations = []
+        for idx, (doc_key, doc_data) in enumerate(document_groups.items(), start=1):
             citation = {
                 "id": idx,
-                "file_name": payload.get('file_name', 'Unknown'),
-                "section": payload.get('section', 'N/A'),
-                "patient_id": payload.get('patient_id', 'N/A'),
-                "clinician_id": payload.get('clinician_id', 'N/A'),
-                "score": float(hit.score) if hasattr(hit, 'score') else None
+                "file_name": doc_data['file_name'],
+                "section": ", ".join(set(chunk['section'] for chunk in doc_data['chunks'])),  # Combined sections
+                "patient_id": doc_data['patient_id'],
+                "clinician_id": doc_data['clinician_id'],
+                "score": doc_data['max_score']
             }
             citations.append(citation)
             
-            # Format content with citation markers
-            content_piece = (
-                f"[{idx}] {payload.get('text', '')}\n"
-                f"(Source: {payload.get('file_name')} - {payload.get('section')})"
-            )
-            formatted_content.append(content_piece)
+            # Format all chunks from this document with the same citation ID
+            for chunk in doc_data['chunks']:
+                content_piece = (
+                    f"[{idx}] {chunk['text']}\n"
+                    f"(Source: {doc_data['file_name']} - {chunk['section']})"
+                )
+                formatted_content.append(content_piece)
         
         result = {
             "content": "\n\n".join(formatted_content),
@@ -146,7 +172,6 @@ async def search_medical_records(
             "error": f"Error occurred during search: {str(e)}",
             "citations": []
         })
-
 
 # ============================================================================
 # PREDICT ALT TOOL
