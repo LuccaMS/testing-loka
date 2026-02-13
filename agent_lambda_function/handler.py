@@ -88,14 +88,14 @@ import pandas as pd
 # Mapping dictionaries based on the feature engineering logic
 MAPPINGS = {
     'sex': {'Female': 0, 'Male': 1},
-    "smoker": {"No": 0, "Yes": 1},
-    "diagnosis_code": {"D1": 1.0, "D2": 2.0, "D3": 3.0, "D4": 4.0, "D5": 5.0},
-    "exercise_frequency": {"Low": 0.0, "Moderate": 1.0, "High": 2.0},
-    "diet_quality": {"Poor": 0.0, "Average": 1.0, "Good": 2.0},
-    "income_bracket": {"Low": 0.0, "Middle": 1.0, "High": 2.0},
-    "education_level": {"Primary": 0.0, "Secondary": 1.0, "Tertiary": 2.0},
-    "urban": {"No": 0.0, "Yes": 1.0},
-    "readmitted": {"No": 0.0, "Yes": 1.0}
+    'smoker': {'No': 0, 'Yes': 1},
+    'diagnosis_code': {'D1': 1.0, 'D2': 2.0, 'D3': 3.0, 'D4': 4.0, 'D5': 5.0},
+    'exercise_frequency': {'Low': 0.0, 'Moderate': 1.0, 'High': 2.0},
+    'diet_quality': {'Poor': 0.0, 'Average': 1.0, 'Good': 2.0},
+    'income_bracket': {'Low': 0.0, 'Middle': 1.0, 'High': 2.0},
+    'education_level': {'Primary': 0.0, 'Secondary': 1.0, 'Tertiary': 2.0},
+    'urban': {'No': 0.0, 'Yes': 1.0},
+    'readmitted': {'No': 0.0, 'Yes': 1.0}
 }
 
 @tool
