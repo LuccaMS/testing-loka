@@ -2,7 +2,7 @@ resource "aws_lambda_function" "python_lambda" {
   function_name = "agent-lambda"
   role          = aws_iam_role.lambda_role.arn
   runtime       = "python3.12"
-  handler       = "main.handler"
+  handler       = "main2.handler"
   timeout       = 300
 
   memory_size = 1024

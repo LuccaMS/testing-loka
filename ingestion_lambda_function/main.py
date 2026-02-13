@@ -31,6 +31,7 @@ from utils import process_markdown_content
 
 COLLECTION_NAME = "medical_docs"
 VECTOR_SIZE = 768
+MAX_FILES_PER_REQUEST = 5
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("medical-api")
@@ -105,6 +106,7 @@ class HealthResponse(BaseModel):
 
 class IngestResponse(BaseModel):
     results: List[Dict[str, Any]]
+    summary: Dict[str, int] = Field(default_factory=dict)
 
 class SearchResult(BaseModel):
     score: float
@@ -121,7 +123,7 @@ class SearchResult(BaseModel):
 
 app = FastAPI(
     title="Medical Document Ingestion API",
-    version="1.2.0",
+    version="1.3.0",
     lifespan=lifespan
 )
 
@@ -181,6 +183,115 @@ def generate_embeddings(client: genai.Client, texts: List[str]) -> List[List[flo
 def generate_deterministic_uuid(input_str: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_DNS, input_str))
 
+def validate_files(files: List[UploadFile], max_files: int = MAX_FILES_PER_REQUEST) -> None:
+    """Validates uploaded files for count and extension."""
+    if not files:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No files provided"
+        )
+    
+    if len(files) > max_files:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Maximum {max_files} files allowed per request. Received {len(files)} files."
+        )
+    
+    for file in files:
+        if not file.filename:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="File with missing filename detected"
+            )
+        if not file.filename.lower().endswith('.md'):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Only .md (Markdown) files are allowed. Invalid file: {file.filename}"
+            )
+
+async def process_single_file(
+    file: UploadFile,
+    q_client: AsyncQdrantClient,
+    g_client: genai.Client
+) -> Dict[str, Any]:
+    """Process a single file: read, chunk, embed, and upsert to Qdrant."""
+    try:
+        # 1. Read and Process (CPU bound -> ThreadPool)
+        content_bytes = await file.read()
+        raw_content = content_bytes.decode("utf-8")
+        
+        processed = await asyncio.to_thread(
+            process_markdown_content, raw_content, file.filename
+        )
+        
+        file_hash = processed["file_hash"]
+        doc_id = processed["document_id"]
+
+        # 2. Check for Duplicates
+        existing_count = await q_client.count(
+            collection_name=COLLECTION_NAME,
+            count_filter=Filter(
+                must=[FieldCondition(key="file_hash", match=MatchValue(value=file_hash))]
+            )
+        )
+        
+        if existing_count.count > 0:
+            return {
+                "file": file.filename, 
+                "status": "skipped", 
+                "reason": "Duplicate SHA256"
+            }
+
+        # 3. Generate Embeddings (Network/CPU bound -> ThreadPool)
+        texts = [c["content"] for c in processed["chunks"]]
+        if not texts:
+            return {
+                "file": file.filename, 
+                "status": "skipped", 
+                "reason": "Empty content"
+            }
+
+        embeddings = await asyncio.to_thread(generate_embeddings, g_client, texts)
+
+        # 4. Prepare Points
+        points = []
+        for i, (chunk, vector) in enumerate(zip(processed["chunks"], embeddings)):
+            point_id = generate_deterministic_uuid(f"{file_hash}_{i}")
+            
+            payload = {
+                "file_hash": file_hash,
+                "document_id": doc_id,
+                "text": chunk["content"],
+                "chunk_index": chunk["chunk_index"],
+                "section": chunk["metadata"].get("Section", "General"),
+                "patient_id": chunk["metadata"].get("patient_id"),
+                "clinician_id": chunk["metadata"].get("clinician_id"),
+                "file_name": file.filename
+            }
+            
+            points.append(PointStruct(id=point_id, vector=vector, payload=payload))
+
+        # 5. Upsert
+        await q_client.upsert(
+            collection_name=COLLECTION_NAME,
+            points=points
+        )
+
+        return {
+            "file": file.filename, 
+            "doc_id": doc_id, 
+            "status": "success", 
+            "chunks": len(points)
+        }
+
+    except Exception as e:
+        logger.error(f"Error processing {file.filename}: {e}", exc_info=True)
+        return {
+            "file": file.filename, 
+            "status": "error", 
+            "message": str(e)
+        }
+
 # ------------------------
 # Routes
 # ------------------------
@@ -209,85 +320,43 @@ async def health_check():
 
 @app.post("/ingest", response_model=IngestResponse, tags=["Documents"])
 async def ingest_markdowns(
-    files: List[UploadFile] = File(...),
+    files: List[UploadFile] = File(..., description=f"Upload 1-{MAX_FILES_PER_REQUEST} markdown (.md) files"),
     q_client: AsyncQdrantClient = Depends(get_qdrant_client),
     g_client: genai.Client = Depends(get_gemini_client)
 ):
-    results = []
-
-    for file in files:
-        try:
-            # 1. Read and Process (CPU bound -> ThreadPool)
-            content_bytes = await file.read()
-            raw_content = content_bytes.decode("utf-8")
-            
-            processed = await asyncio.to_thread(
-                process_markdown_content, raw_content, file.filename
-            )
-            
-            file_hash = processed["file_hash"]
-            doc_id = processed["document_id"]
-
-            # 2. Check for Duplicates
-            existing_count = await q_client.count(
-                collection_name=COLLECTION_NAME,
-                count_filter=Filter(
-                    must=[FieldCondition(key="file_hash", match=MatchValue(value=file_hash))]
-                )
-            )
-            
-            if existing_count.count > 0:
-                results.append({
-                    "file": file.filename, 
-                    "status": "skipped", 
-                    "reason": "Duplicate SHA256"
-                })
-                continue
-
-            # 3. Generate Embeddings (Network/CPU bound -> ThreadPool)
-            texts = [c["content"] for c in processed["chunks"]]
-            if not texts:
-                results.append({"file": file.filename, "status": "skipped", "reason": "Empty content"})
-                continue
-
-            embeddings = await asyncio.to_thread(generate_embeddings, g_client, texts)
-
-            # 4. Prepare Points
-            points = []
-            for i, (chunk, vector) in enumerate(zip(processed["chunks"], embeddings)):
-                point_id = generate_deterministic_uuid(f"{file_hash}_{i}")
-                
-                payload = {
-                    "file_hash": file_hash,
-                    "document_id": doc_id,
-                    "text": chunk["content"],
-                    "chunk_index": chunk["chunk_index"],
-                    "section": chunk["metadata"].get("Section", "General"),
-                    "patient_id": chunk["metadata"].get("patient_id"),
-                    "clinician_id": chunk["metadata"].get("clinician_id"),
-                    "file_name": file.filename
-                }
-                
-                points.append(PointStruct(id=point_id, vector=vector, payload=payload))
-
-            # 5. Upsert
-            await q_client.upsert(
-                collection_name=COLLECTION_NAME,
-                points=points
-            )
-
-            results.append({
-                "file": file.filename, 
-                "doc_id": doc_id, 
-                "status": "success", 
-                "chunks": len(points)
-            })
-
-        except Exception as e:
-            logger.error(f"Error processing {file.filename}: {e}", exc_info=True)
-            results.append({"file": file.filename, "status": "error", "message": str(e)})
-
-    return {"results": results}
+    """
+    Ingest multiple markdown files (up to 5) into the vector database.
+    
+    - Files are processed concurrently for better performance
+    - Only .md files are accepted
+    - Duplicate files (based on SHA256 hash) are automatically skipped
+    """
+    # Validate files before processing
+    validate_files(files)
+    
+    # Process all files concurrently
+    tasks = [
+        process_single_file(file, q_client, g_client)
+        for file in files
+    ]
+    
+    results = await asyncio.gather(*tasks)
+    
+    # Generate summary statistics
+    summary = {
+        "total": len(results),
+        "success": sum(1 for r in results if r["status"] == "success"),
+        "skipped": sum(1 for r in results if r["status"] == "skipped"),
+        "error": sum(1 for r in results if r["status"] == "error"),
+        "total_chunks": sum(r.get("chunks", 0) for r in results if r["status"] == "success")
+    }
+    
+    logger.info(f"Batch ingestion complete: {summary}")
+    
+    return {
+        "results": results,
+        "summary": summary
+    }
 
 @app.get("/search", tags=["Search"])
 async def search_documents(
