@@ -1,1 +1,3 @@
-You might face an error like "rm: cannot remove '" when running the build.sh. To fix that delete the /build folder and execute it again.
+You MUST always run the build.sh command with sudo, without it lambda hot reload faces errors.
+
+chmod + ./build.sh

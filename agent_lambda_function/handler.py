@@ -85,7 +85,6 @@ import pandas as pd
 #These values are the most frequent ones, so if the person do not give this information we use
 #the most frequent as default
 
-
 # Mapping dictionaries based on the feature engineering logic
 MAPPINGS = {
     'sex': {'Female': 0, 'Male': 1},
@@ -170,10 +169,6 @@ def predict_alanine_aminotransferase(
         logger.error(f"XGBoost Prediction Error: {e}")
         return f"I encountered an error while trying to calculate the prediction: {str(e)}"
 
-# ------------------------
-# 1. The RAG Tool
-# ------------------------
-
 @tool
 async def search_medical_records(
     query: str, 
@@ -241,16 +236,11 @@ async def search_medical_records(
         logger.error(f"Search tool error: {str(e)}")
         return f"Error occurred during search: {str(e)}"
 
-# ------------------------
-# 2. The Agent Setup
-# ------------------------
-
 def get_agent():
     """Initializes the LangGraph ReAct agent."""
     if not GEMINI_API_KEY:
         raise ValueError("GEMINI_API_KEY is missing")
 
-    # LangChain wrapper for Gemini Chat (works well for logic)
     llm = ChatGoogleGenerativeAI(
         model=os.environ.get("MODEL_ID", "gemini-2.0-flash-lite") ,
         temperature=0,
@@ -339,10 +329,6 @@ def get_agent():
     
     return agent_executor
 
-# ------------------------
-# 3. FastAPI & Lifespan
-# ------------------------
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize connections on startup."""
@@ -406,11 +392,15 @@ async def chat_endpoint(request: ChatRequest):
         # LangGraph invocation
         result = await agent.ainvoke(inputs)
 
-        logger.info(result["messages"])
+        print(result["messages"])
         
         # Result is a dict with 'messages' list. Last one is the AI response.
         final_message = result["messages"][-1].content
-        
+
+        #usually this is not needed, but gemini  "gemini-3-flash-preview" add signatures to tool usage
+        if isinstance(final_message, list):
+            final_message = final_message.get("text", "empty")
+            
         # Debug: Check for tool usage
         tool_usage = []
         for m in result["messages"]:

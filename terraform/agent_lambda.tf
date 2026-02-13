@@ -18,7 +18,8 @@ resource "aws_lambda_function" "python_lambda" {
       GEMINI_API_KEY     = var.gemini_api_key
       QDRANT_HOST         = "qdrant"
       QDRANT_PORT         = "6333"
-      MODEL_ID           = "gemini-2.5-flash-lite"
+      #MODEL_ID           = "gemini-2.5-flash-lite"
+      MODEL_ID           = "gemini-3-flash-preview"
       EMBEDDING_MODEL_ID = "gemini-embedding-001"
     }
   }
@@ -35,7 +36,7 @@ resource "aws_lambda_function_url" "example" {
   }
 }
 
-output "funcion_url" {
-  description = "lambda function url"
+output "function_url" {
+  description = "Agent Lambda Function URL"
   value       = aws_lambda_function_url.example.function_url
 }

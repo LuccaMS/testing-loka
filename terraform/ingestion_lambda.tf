@@ -36,6 +36,6 @@ resource "aws_lambda_function_url" "ingestion_lambda" {
 }
 
 output "ingestion_lambda_function_url" {
-  description = "ingestion ambda function url"
+  description = "Ingestion Lambda function url"
   value       = aws_lambda_function_url.ingestion_lambda.function_url
 }
