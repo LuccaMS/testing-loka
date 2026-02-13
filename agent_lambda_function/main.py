@@ -30,10 +30,13 @@ from config import (
     COLLECTION_NAME,
     VECTOR_SIZE,
     XGBOOST_MODEL_PATH,
+    PATIENT_DATA_CSV_PATH,
     SYSTEM_PROMPT
 )
 from models import ChatRequest, ChatResponse, Citation
+
 import tools as tool_module
+import tool_analytics as tool_module2
 
 # ------------------------
 # Logging Configuration
@@ -54,6 +57,7 @@ xgboost_model = None
 # Agent Configuration
 # ------------------------
 
+
 def get_agent():
     """Initialize the LangChain agent."""
     if not GEMINI_API_KEY:
@@ -67,7 +71,8 @@ def get_agent():
 
     tools = [
         tool_module.search_medical_records,
-        tool_module.predict_alanine_aminotransferase
+        tool_module.predict_alanine_aminotransferase,
+        tool_module2.query_patient_data
     ]
 
     agent_executor = create_agent(
@@ -120,6 +125,14 @@ async def lifespan(app: FastAPI):
         logger.info(f"✓ XGBoost model loaded from {XGBOOST_MODEL_PATH}")
     except Exception as e:
         logger.error(f"✗ Failed to load XGBoost model: {e}")
+        raise
+    
+    # Load Patient Data CSV
+    try:
+        tool_module2.init_patient_data(PATIENT_DATA_CSV_PATH)
+        logger.info(f"✓ Patient data loaded from {PATIENT_DATA_CSV_PATH}")
+    except Exception as e:
+        logger.error(f"✗ Failed to load patient data: {e}")
         raise
     
     # Initialize tools with dependencies
@@ -224,7 +237,7 @@ async def chat_endpoint(request: ChatRequest):
         if isinstance(final_message, list):
             final_message = final_message[0].get("text", "No response generated")
         
-        # Extract tool usage
+        # Extract tool usage and citations
         tool_usage = []
         citations = []
         
@@ -243,7 +256,7 @@ async def chat_endpoint(request: ChatRequest):
                     if 'citations' in content_json and content_json['citations']:
                         for citation_data in content_json['citations']:
                             citations.append(Citation(**citation_data))
-                        logger.info(f"📚 Extracted {len(content_json['citations'])} citations")
+                        logger.info(f"📚 Extracted {len(content_json['citations'])} citation(s) from {len(set(c['file_name'] for c in content_json['citations']))} document(s)")
                 except (json.JSONDecodeError, TypeError, KeyError):
                     pass  # Not a JSON response or no citations
 
