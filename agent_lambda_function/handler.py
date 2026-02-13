@@ -28,6 +28,11 @@ from langchain_core.messages import HumanMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
 import joblib
 
+from langfuse.langchain import CallbackHandler
+ 
+# Initialize Langfuse CallbackHandler for Langchain (tracing)
+langfuse_handler = CallbackHandler()
+
 # ------------------------
 # Configuration
 # ------------------------
@@ -399,7 +404,7 @@ async def chat_endpoint(request: ChatRequest):
 
         #usually this is not needed, but gemini  "gemini-3-flash-preview" add signatures to tool usage
         if isinstance(final_message, list):
-            final_message = final_message.get("text", "empty")
+            final_message = final_message[0].get("text", "empty")
             
         # Debug: Check for tool usage
         tool_usage = []
